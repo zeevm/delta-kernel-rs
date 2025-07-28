@@ -122,9 +122,9 @@ projects.
 
 There are a few key concepts that will help in understanding kernel:
 
-1. The `Engine` trait encapsulates all the functionality and engine or connector needs to provide to
+1. The `Engine` trait encapsulates all the functionality an engine or connector needs to provide to
    the Delta Kernel in order to read/write the Delta table.
-2. The `DefaultEngine` is our default implementation of the the above trait. It lives in
+2. The `DefaultEngine` is our default implementation of the above trait. It lives in
    `engine/default`, and provides a reference implementation for all `Engine`
    functionality. `DefaultEngine` uses [arrow](https://docs.rs/arrow/latest/arrow/) as its in-memory
    data format.
@@ -140,9 +140,6 @@ Some design principles which should be considered:
   `DefaultEngine` _does_ use async quite heavily. It doesn't depend on a particular runtime however,
   and implementations could provide an "executor" based on tokio, smol, async-std, or whatever might
   be needed. Currently only a `tokio` based executor is provided.
-- Minimal `Table` API. The kernel intentionally exposes the concept of immutable versions of tables
-  through the snapshot API. This encourages users to think about the Delta table state more
-  accurately.
 - Prefer builder style APIs over object oriented ones.
 - "Simple" set of default-features enabled to provide the basic functionality with the least
   necessary amount of dependencies possible. Putting more complex optimizations or APIs behind
@@ -156,7 +153,7 @@ Some design principles which should be considered:
 - If using `emacs`, both [eglot](https://github.com/joaotavora/eglot) and
   [lsp-mode](https://github.com/emacs-lsp/lsp-mode) provide excellent integration with
   `rust-analyzer`. [rustic](https://github.com/brotzeit/rustic) is a nice mode as well.
-- When also developing in vscode its sometimes convenient to configure rust-analyzer in
+- When also developing in VS Code it's sometimes convenient to configure rust-analyzer in
   `.vscode/settings.json`.
 
 ```json

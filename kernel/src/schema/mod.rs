@@ -16,13 +16,19 @@ use crate::{DeltaResult, Error};
 use delta_kernel_derive::internal_api;
 
 pub(crate) mod compare;
+
+#[cfg(feature = "internal-api")]
+pub mod derive_macro_utils;
+#[cfg(not(feature = "internal-api"))]
 pub(crate) mod derive_macro_utils;
+pub(crate) mod variant_utils;
 
 pub type Schema = StructType;
 pub type SchemaRef = Arc<StructType>;
 
 /// Converts a type to a [`Schema`] that represents that type. Derivable for struct types using the
 /// [`delta_kernel_derive::ToSchema`] derive macro.
+#[internal_api]
 pub(crate) trait ToSchema {
     fn to_schema() -> StructType;
 }
@@ -142,6 +148,7 @@ impl StructField {
         Self::new(name, data_type, false)
     }
 
+    /// Replaces `self.metadata` with the list of <key, value> pairs in `metadata`.
     pub fn with_metadata(
         mut self,
         metadata: impl IntoIterator<Item = (impl Into<String>, impl Into<MetadataValue>)>,
@@ -150,6 +157,16 @@ impl StructField {
             .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
+        self
+    }
+
+    /// Extends `self.metadata` to include the <key, value> pairs in `metadata`.
+    pub fn add_metadata(
+        mut self,
+        metadata: impl IntoIterator<Item = (impl Into<String>, impl Into<MetadataValue>)>,
+    ) -> Self {
+        self.metadata
+            .extend(metadata.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
 
@@ -229,6 +246,7 @@ impl StructField {
             }
         }
         // NOTE: unwrap is safe because the transformer is incapable of returning None
+        #[allow(clippy::unwrap_used)]
         MakePhysical
             .transform_struct_field(self)
             .unwrap()
@@ -604,6 +622,31 @@ where
     DecimalType::try_new(precision, scale).map_err(serde::de::Error::custom)
 }
 
+fn serialize_variant<S: serde::Serializer>(
+    _: &StructType,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str("variant")
+}
+
+fn deserialize_variant<'de, D>(deserializer: D) -> Result<Box<StructType>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let str_value = String::deserialize(deserializer)?;
+    require!(
+        str_value == "variant",
+        serde::de::Error::custom(format!("Invalid variant: {str_value}"))
+    );
+    match DataType::unshredded_variant() {
+        DataType::Variant(st) => Ok(st),
+        _ => Err(serde::de::Error::custom(
+            "Issue in DataType::unshredded_variant(). Please raise an issue at ".to_string()
+                + "delta-io/delta-kernel-rs.",
+        )),
+    }
+}
+
 impl Display for PrimitiveType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -639,6 +682,13 @@ pub enum DataType {
     /// A map stores an arbitrary length collection of key-value pairs
     /// with a single keyType and a single valueType
     Map(Box<MapType>),
+    /// The Variant data type. The physical representation can be flexible to support shredded
+    /// reads. The unshredded schema is `Variant(StructType<metadata: BINARY, value: BINARY>)`.
+    #[serde(
+        serialize_with = "serialize_variant",
+        deserialize_with = "deserialize_variant"
+    )]
+    Variant(Box<StructType>),
 }
 
 impl From<DecimalType> for PrimitiveType {
@@ -695,25 +745,40 @@ impl DataType {
     pub const TIMESTAMP: Self = DataType::Primitive(PrimitiveType::Timestamp);
     pub const TIMESTAMP_NTZ: Self = DataType::Primitive(PrimitiveType::TimestampNtz);
 
+    /// Create a new decimal type with the given precision and scale.
     pub fn decimal(precision: u8, scale: u8) -> DeltaResult<Self> {
         Ok(PrimitiveType::decimal(precision, scale)?.into())
     }
 
-    // This function assumes that the caller has already checked the precision and scale
-    // and that they are valid. Will panic if they are not.
-    pub fn decimal_unchecked(precision: u8, scale: u8) -> Self {
-        Self::decimal(precision, scale).unwrap()
-    }
-
+    /// Create a new struct type with the given fields.
     pub fn struct_type(fields: impl IntoIterator<Item = StructField>) -> Self {
         StructType::new(fields).into()
     }
+
+    /// Create a new struct type from a fallible iterator of fields.
     pub fn try_struct_type<E>(
         fields: impl IntoIterator<Item = Result<StructField, E>>,
     ) -> Result<Self, E> {
         Ok(StructType::try_new(fields)?.into())
     }
 
+    /// Create a new unshredded [`DataType::Variant`]. This data type is a struct of two not-null
+    /// binary fields: `metadata` and `value`.
+    pub fn unshredded_variant() -> Self {
+        DataType::variant_type([
+            StructField::not_null("metadata", DataType::BINARY),
+            StructField::not_null("value", DataType::BINARY),
+        ])
+    }
+
+    /// Create a new [`DataType::Variant`] from the provided fields. For unshredded variants, you
+    /// should prefer using [`DataType::unshredded_variant`].
+    pub fn variant_type(fields: impl IntoIterator<Item = StructField>) -> Self {
+        DataType::Variant(Box::new(StructType::new(fields)))
+    }
+
+    /// Attempt to convert this data type to a [`PrimitiveType`]. Returns `None` if this is a
+    /// non-primitive type.
     pub fn as_primitive_opt(&self) -> Option<&PrimitiveType> {
         match self {
             DataType::Primitive(ptype) => Some(ptype),
@@ -738,6 +803,7 @@ impl Display for DataType {
                 write!(f, ">")
             }
             DataType::Map(m) => write!(f, "map<{}, {}>", m.key_type, m.value_type),
+            DataType::Variant(_) => write!(f, "variant"),
         }
     }
 }
@@ -808,6 +874,11 @@ pub trait SchemaTransform<'a> {
         self.transform(etype)
     }
 
+    /// Called for each variant values encountered. By default does nothing
+    fn transform_variant(&mut self, etype: &'a DataType) -> Option<Cow<'a, DataType>> {
+        Some(Cow::Borrowed(etype))
+    }
+
     /// General entry point for a recursive traversal over any data type. Also invoked internally to
     /// dispatch on nested data types encountered during the traversal.
     fn transform(&mut self, data_type: &'a DataType) -> Option<Cow<'a, DataType>> {
@@ -824,6 +895,9 @@ pub trait SchemaTransform<'a> {
                 .map_owned_or_else(data_type, DataType::from),
             Map(mtype) => self
                 .transform_map(mtype)?
+                .map_owned_or_else(data_type, DataType::from),
+            Variant(_) => self
+                .transform_variant(data_type)?
                 .map_owned_or_else(data_type, DataType::from),
         };
         Some(result)
@@ -1090,6 +1164,47 @@ mod tests {
             json_str,
             r#"{"name":"a","type":"decimal(10,2)","nullable":false,"metadata":{}}"#
         );
+    }
+
+    #[test]
+    fn test_roundtrip_variant() {
+        let data = r#"
+        {
+            "name": "v",
+            "type": "variant",
+            "nullable": false,
+            "metadata": {}
+        }
+        "#;
+        let field: StructField = serde_json::from_str(data).unwrap();
+        assert_eq!(field.data_type, DataType::unshredded_variant());
+
+        let json_str = serde_json::to_string(&field).unwrap();
+        assert_eq!(
+            json_str,
+            r#"{"name":"v","type":"variant","nullable":false,"metadata":{}}"#
+        );
+    }
+
+    #[test]
+    fn test_unshredded_variant() {
+        let unshredded_variant_type = DataType::unshredded_variant();
+
+        match &unshredded_variant_type {
+            DataType::Variant(struct_type) => {
+                let fields: Vec<_> = struct_type.fields().collect();
+                assert_eq!(fields.len(), 2);
+
+                assert_eq!(fields[0].name, "metadata");
+                assert_eq!(fields[0].data_type, DataType::BINARY);
+                assert!(!fields[0].nullable);
+
+                assert_eq!(fields[1].name, "value");
+                assert_eq!(fields[1].data_type, DataType::BINARY);
+                assert!(!fields[1].nullable);
+            }
+            _ => panic!("Expected DataType::Variant, got {unshredded_variant_type:?}"),
+        }
     }
 
     #[test]

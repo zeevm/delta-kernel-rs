@@ -2,7 +2,7 @@
 //!
 //! Exposes that an engine needs to call from C/C++ to interface with kernel
 
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 use std::collections::HashMap;
 use std::default::Default;
 use std::os::raw::{c_char, c_void};
@@ -14,7 +14,7 @@ use url::Url;
 use delta_kernel::schema::Schema;
 use delta_kernel::snapshot::Snapshot;
 use delta_kernel::Version;
-use delta_kernel::{DeltaResult, Engine, EngineData, Table};
+use delta_kernel::{DeltaResult, Engine, EngineData};
 use delta_kernel_ffi_macros::handle_descriptor;
 
 // cbindgen doesn't understand our use of feature flags here, and by default it parses `mod handle`
@@ -32,6 +32,8 @@ use handle::Handle;
 // relies on `crate::`
 extern crate self as delta_kernel_ffi;
 
+mod domain_metadata;
+pub use domain_metadata::get_domain_metadata;
 pub mod engine_data;
 pub mod engine_funcs;
 pub mod error;
@@ -41,6 +43,9 @@ pub mod expressions;
 pub mod ffi_tracing;
 pub mod scan;
 pub mod schema;
+
+#[cfg(test)]
+mod ffi_test_utils;
 #[cfg(feature = "test-ffi")]
 pub mod test_ffi;
 
@@ -356,14 +361,14 @@ pub trait ExternEngine: Send + Sync {
 #[handle_descriptor(target=dyn ExternEngine, mutable=false)]
 pub struct SharedExternEngine;
 
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 struct ExternEngineVtable {
     // Actual engine instance to use
     engine: Arc<dyn Engine>,
     allocate_error: AllocateErrorFn,
 }
 
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 impl Drop for ExternEngineVtable {
     fn drop(&mut self) {
         debug!("dropping engine interface");
@@ -374,7 +379,7 @@ impl Drop for ExternEngineVtable {
 ///
 /// Kernel doesn't use any threading or concurrency. If engine chooses to do so, engine is
 /// responsible for handling  any races that could result.
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 unsafe impl Send for ExternEngineVtable {}
 
 /// # Safety
@@ -386,10 +391,10 @@ unsafe impl Send for ExternEngineVtable {}
 /// Basically, by failing to implement these traits, we forbid the engine from being able to declare
 /// its thread-safety (because rust assumes it is not threadsafe). By implementing them, we leave it
 /// up to the engine to enforce thread safety if engine chooses to use threads at all.
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 unsafe impl Sync for ExternEngineVtable {}
 
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 impl ExternEngine for ExternEngineVtable {
     fn engine(&self) -> Arc<dyn Engine> {
         self.engine.clone()
@@ -404,19 +409,18 @@ impl ExternEngine for ExternEngineVtable {
 /// Caller is responsible for passing a valid path pointer.
 unsafe fn unwrap_and_parse_path_as_url(path: KernelStringSlice) -> DeltaResult<Url> {
     let path: &str = unsafe { TryFromStringSlice::try_from_slice(&path) }?;
-    let table = Table::try_from_uri(path)?;
-    Ok(table.location().clone())
+    delta_kernel::try_parse_uri(path)
 }
 
 /// A builder that allows setting options on the `Engine` before actually building it
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 pub struct EngineBuilder {
     url: Url,
     allocate_fn: AllocateErrorFn,
     options: HashMap<String, String>,
 }
 
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 impl EngineBuilder {
     fn set_option(&mut self, key: String, val: String) {
         self.options.insert(key, val);
@@ -429,7 +433,7 @@ impl EngineBuilder {
 ///
 /// # Safety
 /// Caller is responsible for passing a valid path pointer.
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 #[no_mangle]
 pub unsafe extern "C" fn get_engine_builder(
     path: KernelStringSlice,
@@ -439,7 +443,7 @@ pub unsafe extern "C" fn get_engine_builder(
     get_engine_builder_impl(url, allocate_error).into_extern_result(&allocate_error)
 }
 
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 fn get_engine_builder_impl(
     url: DeltaResult<Url>,
     allocate_fn: AllocateErrorFn,
@@ -457,7 +461,7 @@ fn get_engine_builder_impl(
 /// # Safety
 ///
 /// Caller must pass a valid EngineBuilder pointer, and valid slices for key and value
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 #[no_mangle]
 pub unsafe extern "C" fn set_builder_option(
     builder: &mut EngineBuilder,
@@ -478,7 +482,7 @@ pub unsafe extern "C" fn set_builder_option(
 /// # Safety
 ///
 /// Caller is responsible to pass a valid EngineBuilder pointer, and to not use it again afterwards
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 #[no_mangle]
 pub unsafe extern "C" fn builder_build(
     builder: *mut EngineBuilder,
@@ -495,7 +499,7 @@ pub unsafe extern "C" fn builder_build(
 /// # Safety
 ///
 /// Caller is responsible for passing a valid path pointer.
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 #[no_mangle]
 pub unsafe extern "C" fn get_default_engine(
     path: KernelStringSlice,
@@ -506,7 +510,7 @@ pub unsafe extern "C" fn get_default_engine(
 }
 
 // get the default version of the default engine :)
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 fn get_default_default_engine_impl(
     url: DeltaResult<Url>,
     allocate_error: AllocateErrorFn,
@@ -514,7 +518,10 @@ fn get_default_default_engine_impl(
     get_default_engine_impl(url?, Default::default(), allocate_error)
 }
 
-#[cfg(feature = "default-engine")]
+/// Safety
+///
+/// Caller must free this handle to prevent memory leaks
+#[cfg(feature = "default-engine-base")]
 fn engine_to_handle(
     engine: Arc<dyn Engine>,
     allocate_error: AllocateErrorFn,
@@ -526,7 +533,7 @@ fn engine_to_handle(
     engine.into()
 }
 
-#[cfg(feature = "default-engine")]
+#[cfg(feature = "default-engine-base")]
 fn get_default_engine_impl(
     url: Url,
     options: HashMap<String, String>,
@@ -773,45 +780,19 @@ impl<T> Default for ReferenceSet<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::error::{EngineError, KernelError};
+    use crate::ffi_test_utils::{
+        allocate_err, allocate_str, assert_extern_result_error_with_message, ok_or_panic,
+        recover_string,
+    };
     use delta_kernel::engine::default::{executor::tokio::TokioBackgroundExecutor, DefaultEngine};
     use delta_kernel::object_store::memory::InMemory;
     use test_utils::{actions_to_string, actions_to_string_partitioned, add_commit, TestAction};
 
-    use super::*;
-    use crate::error::{EngineError, KernelError};
-
     #[no_mangle]
-    extern "C" fn allocate_err(etype: KernelError, _: KernelStringSlice) -> *mut EngineError {
-        let boxed = Box::new(EngineError { etype });
-        Box::leak(boxed)
-    }
-
-    #[no_mangle]
-    extern "C" fn allocate_str(kernel_str: KernelStringSlice) -> NullableCvoid {
-        let s = unsafe { String::try_from_slice(&kernel_str) };
-        let ptr = Box::into_raw(Box::new(s.unwrap())).cast(); // never null
-        let ptr = unsafe { NonNull::new_unchecked(ptr) };
-        Some(ptr)
-    }
-
-    // helper to recover an error from the above
-    unsafe fn recover_error(ptr: *mut EngineError) -> EngineError {
-        *Box::from_raw(ptr)
-    }
-
-    // helper to recover a string from the above
-    fn recover_string(ptr: NonNull<c_void>) -> String {
-        let ptr = ptr.as_ptr().cast();
-        *unsafe { Box::from_raw(ptr) }
-    }
-
-    fn ok_or_panic<T>(result: ExternResult<T>) -> T {
-        match result {
-            ExternResult::Ok(t) => t,
-            ExternResult::Err(e) => unsafe {
-                panic!("Got engine error with type {:?}", (*e).etype);
-            },
-        }
+    extern "C" fn allocate_null_err(_: KernelError, _: KernelStringSlice) -> *mut EngineError {
+        std::ptr::null_mut()
     }
 
     #[test]
@@ -877,13 +858,7 @@ mod tests {
         // Test getting non-existent snapshot
         let snapshot_at_non_existent_version =
             unsafe { snapshot_at_version(kernel_string_slice!(path), engine.shallow_copy(), 1) };
-        assert!(snapshot_at_non_existent_version.is_err());
-
-        // Avoid leaking the error by recovering it
-        let ExternResult::Err(e) = snapshot_at_non_existent_version else {
-            panic!("Expected error but operation succeeded");
-        };
-        unsafe { recover_error(e) };
+        assert_extern_result_error_with_message(snapshot_at_non_existent_version, KernelError::GenericError, "Generic delta kernel error: LogSegment end version 0 not the same as the specified end version 1");
 
         let table_root = unsafe { snapshot_table_root(snapshot1.shallow_copy(), allocate_str) };
         assert!(table_root.is_some());
@@ -928,6 +903,28 @@ mod tests {
 
         unsafe { free_string_slice_data(partition_iter) }
         unsafe { free_snapshot(snapshot) }
+        unsafe { free_engine(engine) }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn allocate_null_err_okay() -> Result<(), Box<dyn std::error::Error>> {
+        let storage = Arc::new(InMemory::new());
+        add_commit(
+            storage.as_ref(),
+            0,
+            actions_to_string(vec![TestAction::Metadata]),
+        )
+        .await?;
+        let engine = DefaultEngine::new(storage.clone(), Arc::new(TokioBackgroundExecutor::new()));
+        let engine = engine_to_handle(Arc::new(engine), allocate_null_err);
+        let path = "memory:///";
+
+        // Get a non-existent snapshot, this will call allocate_null_err
+        let snapshot_at_non_existent_version =
+            unsafe { snapshot_at_version(kernel_string_slice!(path), engine.shallow_copy(), 1) };
+        assert!(snapshot_at_non_existent_version.is_err());
+
         unsafe { free_engine(engine) }
         Ok(())
     }
