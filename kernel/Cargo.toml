@@ -63,7 +63,7 @@ reqwest = { version = "0.12.23", default-features = false, optional = true }
 
 tokio = { version = "1.47", optional = true, features = ["rt-multi-thread"] }
 # both arrow versions below are optional and require object_store
-object_store = { version = "0.12.3", optional = true, features = ["aws", "azure", "gcp", "http"] }
+object_store = { version = "0.12.3", optional = true }
 
 # arrow 55
 [dependencies.arrow_55]
@@ -103,8 +103,7 @@ need-arrow = [] # need-arrow is a marker that the feature needs arrow dep
 
 arrow-55 = ["dep:arrow_55", "dep:parquet_55", "object_store"]
 arrow-56 = ["dep:arrow_56", "dep:parquet_56", "object_store"]
-cloud = ["object_store_55?/aws", "object_store_55?/azure", "object_store_55?/gcp", "object_store_55?/http", 
-         "object_store_56?/aws", "object_store_56?/azure", "object_store_56?/gcp", "object_store_56?/http"]
+cloud = ["object_store?/aws", "object_store?/azure", "object_store?/gcp", "object_store?/http"]
 arrow-conversion = ["need-arrow"]
 arrow-expression = ["need-arrow"]
 
