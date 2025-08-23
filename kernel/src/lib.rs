@@ -108,7 +108,7 @@ pub mod transaction;
 compile_error! {"'cloud' feature requires 'arrow-54' or 'arrow-55'"}
 
 mod arrow_compat;
-#[cfg(any(feature = "arrow-54", feature = "arrow-55"))]
+#[cfg(any(feature = "arrow-55", feature = "arrow-56"))]
 pub use arrow_compat::*;
 
 pub mod kernel_predicates;
@@ -137,6 +137,13 @@ pub mod log_segment;
 pub(crate) mod log_segment;
 
 #[cfg(feature = "internal-api")]
+pub mod last_checkpoint_hint;
+#[cfg(not(feature = "internal-api"))]
+pub(crate) mod last_checkpoint_hint;
+
+pub(crate) mod listed_log_files;
+
+#[cfg(feature = "internal-api")]
 pub mod history_manager;
 #[cfg(not(feature = "internal-api"))]
 pub(crate) mod history_manager;
@@ -151,7 +158,11 @@ use expressions::literal_expression_transform::LiteralExpressionTransform;
 use expressions::Scalar;
 use schema::{SchemaTransform, StructField, StructType};
 
-#[cfg(any(feature = "default-engine", feature = "arrow-conversion"))]
+#[cfg(any(
+    feature = "default-engine-native-tls",
+    feature = "default-engine-rustls",
+    feature = "arrow-conversion"
+))]
 pub mod engine;
 
 /// Delta table version is 8 byte unsigned int
@@ -209,15 +220,10 @@ impl TryFrom<DirEntry> for FileMeta {
                 last_modified.as_millis()
             ))
         })?;
-        let metadata_len = metadata.len();
-        #[cfg(all(feature = "arrow-54", not(feature = "arrow-55")))]
-        let metadata_len = metadata_len
-            .try_into()
-            .map_err(|_| Error::generic("unable to convert DirEntry metadata to file size"))?;
         Ok(FileMeta {
             location,
             last_modified,
-            size: metadata_len,
+            size: metadata.len(),
         })
     }
 }
@@ -640,15 +646,18 @@ pub trait Engine: AsAny {
 }
 
 // we have an 'internal' feature flag: default-engine-base, which is actually just the shared
-// pieces of default-engine and default-engine-rustls. the crate can't compile with _only_
+// pieces of default-engine-native-tls and default-engine-rustls. the crate can't compile with _only_
 // default-engine-base, so we give a friendly error here.
 #[cfg(all(
     feature = "default-engine-base",
-    not(any(feature = "default-engine", feature = "default-engine-rustls",))
+    not(any(
+        feature = "default-engine-native-tls",
+        feature = "default-engine-rustls",
+    ))
 ))]
 compile_error!(
     "The default-engine-base feature flag is not meant to be used directly. \
-    Please use either default-engine or default-engine-rustls."
+    Please use either default-engine-native-tls or default-engine-rustls."
 );
 
 // Rustdoc's documentation tests can do some things that regular unit tests can't. Here we are
